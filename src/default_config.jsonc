@@ -1,0 +1,12 @@
+{
+    // Base color for keys. 
+    // Ideally this should be reasonably bright as it represents a key at maximum brightness.
+    "color": {
+        "r": 255,
+        "g": 100,
+        "b": 255
+    }
+    // How many times per second key brightness should be recalculated.
+    // Higher values lead to smoother colors, but also higher CPU usage.
+    // "fps": 60
+}

@@ -1,95 +1,27 @@
-use std::{collections::HashSet, ffi::CString, str::FromStr, time::Duration};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
 
-use hidapi::{HidDevice, HidError};
 use openrgb2::{Color, Controller, DeviceType, OpenRgbClient, OpenRgbResult};
 
-use crate::key_mappings::KeyMapping;
+use crate::{
+    config::{Config, get_config_dir},
+    fade::FadeLeds,
+    hid::{HidReader, KeyEvent},
+    key_mappings::KeyMapping,
+};
 
+mod config;
+mod fade;
+mod hid;
 mod key_mappings;
 
 static BASE_COLOR: Color = Color::new(255, 100, 255);
 
-#[derive(Default, Clone, Copy, Debug)]
-enum FadeState {
-    #[default]
-    Off,
-    On(Brightness),
-}
+fn get_keymap_filepath(controller: &Controller) -> PathBuf {
+    let vendor = controller.vendor().to_lowercase().replace(" ", "_");
+    let name = controller.name().to_lowercase().replace(" ", "_");
 
-impl FadeState {
-    pub fn tick(&mut self) {
-        match self {
-            Self::On(brightness) => {
-                if brightness.tick().is_none() {
-                    *self = FadeState::Off;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn get_brightness(&self) -> u8 {
-        match self {
-            Self::On(brightness) => brightness.0,
-            Self::Off => 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Brightness(u8);
-
-impl Brightness {
-    pub fn tick(&mut self) -> Option<()> {
-        if self.0 == 0 {
-            None
-        } else {
-            self.0 -= 5;
-            Some(())
-        }
-    }
-}
-
-// I barely know what I'm doing! HID reports can probably be more complicated than
-// this thing can cover, but for my specific keyboard (Vulkan TKL), this works well enough. :)
-struct HidReader<const B: usize = 1024> {
-    buffer: [u8; B],
-    device: HidDevice,
-}
-
-impl<const B: usize> HidReader<B> {
-    pub fn new_from_path(path: &str) -> Option<HidReader<B>> {
-        // OpenRGB (for this keyboard at least) prefixes the path with HID because.... yes? So, yeet.
-        let path = path.replace("HID: ", "");
-
-        let device = hidapi::HidApi::new()
-            .unwrap()
-            .open_path(&CString::from_str(&path).ok()?)
-            .unwrap();
-
-        Some(Self {
-            buffer: [0; B],
-            device,
-        })
-    }
-
-    pub fn read_blocking(&mut self) -> Result<KeyEvent, HidError> {
-        let size = self.device.read_timeout(&mut self.buffer, -1)?;
-        let slice = &self.buffer[0..size];
-        Ok(KeyEvent(Vec::from(slice)))
-    }
-}
-
-struct KeyEvent(Vec<u8>);
-
-impl KeyEvent {
-    pub fn is_down(&self) -> bool {
-        self.0.len() >= 5 && self.0[4] > 0
-    }
-
-    pub fn key_bytes(&self) -> u16 {
-        u16::from_ne_bytes([self.0[2], self.0[3]])
-    }
+    let config = get_config_dir();
+    config.join(PathBuf::from_str(&format!("{}-{}.keymap", vendor, name)).unwrap())
 }
 
 async fn setup_device(device: &Controller) -> OpenRgbResult<KeyMapping> {
@@ -138,11 +70,26 @@ async fn wait_for_server() -> OpenRgbClient {
     unreachable!()
 }
 
+pub trait LedFunction {
+    fn new(controller: &Controller) -> Self
+    where
+        Self: Sized;
+
+    fn update(
+        &mut self,
+        configuration: &Config,
+        events: &[KeyEvent],
+        key_map: &KeyMapping,
+        controller: &Controller,
+    ) -> OpenRgbResult<()>;
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> OpenRgbResult<()> {
     let client = wait_for_server().await;
 
-    // TODO: Config of some sort. Where? How? No idea!
+    let config = Config::load_from_first().unwrap();
+
     let keyboard_controller = client
         .get_controllers_of_type(DeviceType::Keyboard)
         .await?
@@ -151,12 +98,9 @@ async fn main() -> OpenRgbResult<()> {
     keyboard_controller.init().await?;
     keyboard_controller.turn_off_leds().await?;
 
-    let path = format!(
-        "./{}.keymap",
-        keyboard_controller.location().split("/").last().unwrap()
-    );
+    let path = get_keymap_filepath(&keyboard_controller);
 
-    println!("Using keymap file at {}", path);
+    println!("Using keymap file at {}", path.to_string_lossy());
 
     let ledmap = match std::fs::read_to_string(&path) {
         Err(_) => {
@@ -176,36 +120,17 @@ async fn main() -> OpenRgbResult<()> {
         }
     });
 
-    let mut led_states = vec![FadeState::Off; keyboard_controller.num_leds()];
+    let sleep_time = 1000 / config.fps() as u64;
+    println!("Frame time: {sleep_time}ms");
+
+    let mut func: Box<dyn LedFunction> =
+        Box::new(<FadeLeds as LedFunction>::new(&keyboard_controller));
 
     loop {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(sleep_time)).await;
 
-        for event in rx.try_iter() {
-            if event.is_down()
-                && let Some(led) = ledmap.get_led(event.key_bytes())
-            {
-                led_states[led] = FadeState::On(Brightness(255));
-            }
-        }
+        let events = rx.try_iter().collect::<Vec<_>>();
 
-        let mut cmd = keyboard_controller.cmd();
-
-        for led in keyboard_controller.led_iter() {
-            let state = led_states.get_mut(led.id()).unwrap();
-            state.tick();
-
-            let brightness = state.get_brightness();
-
-            let new_color = if brightness == 0 {
-                Color::new(0, 0, 0)
-            } else {
-                BASE_COLOR / (255 - brightness)
-            };
-
-            cmd.set_led(led.id(), new_color)?;
-        }
-
-        cmd.execute().await?;
+        func.update(&config, &events, &ledmap, &keyboard_controller)?;
     }
 }
