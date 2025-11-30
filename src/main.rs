@@ -130,7 +130,9 @@ async fn wait_for_server() -> OpenRgbClient {
         if let Ok(client) = OpenRgbClient::connect().await {
             return client;
         } else {
-            tokio::time::sleep(Duration::from_millis((250 * i).max(10000))).await;
+            let ms = (250 * i).max(10000);
+            println!("Could not connect to OpenRGB SDK server. Retrying in {ms}ms.");
+            tokio::time::sleep(Duration::from_millis(ms)).await;
         }
     }
     unreachable!()
@@ -140,13 +142,13 @@ async fn wait_for_server() -> OpenRgbClient {
 async fn main() -> OpenRgbResult<()> {
     let client = wait_for_server().await;
 
+    // TODO: Config of some sort. Where? How? No idea!
     let keyboard_controller = client
         .get_controllers_of_type(DeviceType::Keyboard)
         .await?
         .into_first()?;
 
     keyboard_controller.init().await?;
-
     keyboard_controller.turn_off_leds().await?;
 
     let path = format!(
@@ -158,6 +160,7 @@ async fn main() -> OpenRgbResult<()> {
 
     let ledmap = match std::fs::read_to_string(&path) {
         Err(_) => {
+            println!("No matching keymap file found. Starting setup.");
             let map = setup_device(&keyboard_controller).await?;
             std::fs::write(path, map.as_file_string()).unwrap();
             map
@@ -166,9 +169,7 @@ async fn main() -> OpenRgbResult<()> {
     };
 
     let (tx, rx) = std::sync::mpsc::channel::<KeyEvent>();
-
     let mut device = HidReader::<512>::new_from_path(keyboard_controller.location()).unwrap();
-
     tokio::spawn(async move {
         loop {
             tx.send(device.read_blocking().unwrap()).unwrap()
@@ -180,11 +181,18 @@ async fn main() -> OpenRgbResult<()> {
     loop {
         tokio::time::sleep(Duration::from_millis(25)).await;
 
+        for event in rx.try_iter() {
+            if event.is_down()
+                && let Some(led) = ledmap.get_led(event.key_bytes())
+            {
+                led_states[led] = FadeState::On(Brightness(255));
+            }
+        }
+
         let mut cmd = keyboard_controller.cmd();
 
         for led in keyboard_controller.led_iter() {
             let state = led_states.get_mut(led.id()).unwrap();
-
             state.tick();
 
             let brightness = state.get_brightness();
@@ -196,14 +204,6 @@ async fn main() -> OpenRgbResult<()> {
             };
 
             cmd.set_led(led.id(), new_color)?;
-        }
-
-        for event in rx.try_iter() {
-            if event.is_down()
-                && let Some(led) = ledmap.get_led(event.key_bytes())
-            {
-                led_states[led] = FadeState::On(Brightness(255));
-            }
         }
 
         cmd.execute().await?;

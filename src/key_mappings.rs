@@ -1,3 +1,4 @@
+#[derive(Clone, Debug)]
 pub struct KeyMapping(Vec<u16>);
 
 impl KeyMapping {
@@ -19,11 +20,12 @@ impl KeyMapping {
             .join("\n")
     }
 
-    pub fn get_led(&self, key_byte: u16) -> Option<usize> {
+    /// Get the LED index corresponding to the input key.
+    pub fn get_led(&self, key: u16) -> Option<usize> {
         self.0
             .iter()
             .enumerate()
-            .find_map(|(idx, key)| if *key == key_byte { Some(idx) } else { None })
+            .find_map(|(idx, other)| if key == *other { Some(idx) } else { None })
     }
 }
 
