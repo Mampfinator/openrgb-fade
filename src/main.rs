@@ -62,7 +62,7 @@ async fn wait_for_server() -> OpenRgbClient {
         if let Ok(client) = OpenRgbClient::connect().await {
             return client;
         } else {
-            let ms = (250 * i).max(10000);
+            let ms = (250 * i).min(10000);
             println!("Could not connect to OpenRGB SDK server. Retrying in {ms}ms.");
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
