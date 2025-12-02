@@ -15,7 +15,7 @@ pub struct Color {
     pub b: u8,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SDKServerInfo {
     pub address: Option<String>,
     pub port: Option<u16>,
@@ -27,7 +27,7 @@ impl From<Color> for OrgbColor {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     color: Color,
     fps: Option<usize>,

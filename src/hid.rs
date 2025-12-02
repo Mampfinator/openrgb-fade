@@ -15,9 +15,9 @@ impl<const B: usize> HidReader<B> {
         let path = path.replace("HID: ", "");
 
         let device = hidapi::HidApi::new()
-            .unwrap()
+            .ok()?
             .open_path(&CString::from_str(&path).ok()?)
-            .unwrap();
+            .ok()?;
 
         Some(Self {
             buffer: [0; B],

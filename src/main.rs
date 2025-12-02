@@ -1,6 +1,16 @@
-use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    pin::Pin,
+    str::FromStr,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    task::{Context, Poll},
+    time::Duration,
+};
 
-use openrgb2::{Color, Controller, DeviceType, OpenRgbClient, OpenRgbResult};
+use clap::{Parser, Subcommand};
+use openrgb2::{Color, Controller, DeviceType, OpenRgbClient, OpenRgbError, OpenRgbResult};
+use smol::Timer;
 
 use crate::{
     config::{Config, get_config_dir},
@@ -15,6 +25,22 @@ mod hid;
 mod key_mappings;
 
 static BASE_COLOR: Color = Color::new(255, 100, 255);
+
+#[derive(Parser, Debug)]
+pub struct Arguments {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, Default)]
+enum Command {
+    #[default]
+    Run,
+    Setup {
+        // Which device to set up. Should be a device file path (aka /dev/hidrawX).
+        device: String,
+    },
+}
 
 fn get_keymap_filepath(controller: &Controller) -> PathBuf {
     let vendor = controller.vendor().to_lowercase().replace(" ", "_");
@@ -59,12 +85,12 @@ async fn setup_device(device: &Controller) -> OpenRgbResult<KeyMapping> {
 
 async fn wait_for_server() -> OpenRgbClient {
     for i in 0.. {
-        if let Ok(client) = OpenRgbClient::connect().await {
+        if let Ok(client) = OpenRgbClient::connect_to(("0.0.0.0", 6742), 5).await {
             return client;
         } else {
             let ms = (250 * i).min(10000);
             println!("Could not connect to OpenRGB SDK server. Retrying in {ms}ms.");
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Timer::after(Duration::from_millis(ms)).await;
         }
     }
     unreachable!()
@@ -84,53 +110,152 @@ pub trait LedFunction {
     ) -> OpenRgbResult<()>;
 }
 
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::main]
 async fn main() -> OpenRgbResult<()> {
-    let client = wait_for_server().await;
+    let mut client = wait_for_server().await;
+    client.set_name("openrgb-fade").await?;
 
     let config = Config::load_from_first().unwrap();
 
-    let keyboard_controller = client
-        .get_controllers_of_type(DeviceType::Keyboard)
-        .await?
-        .into_first()?;
+    let arguments = Arguments::parse();
 
-    keyboard_controller.init().await?;
-    keyboard_controller.turn_off_leds().await?;
+    match arguments.command.unwrap_or_default() {
+        Command::Setup {
+            device: device_path,
+        } => {
+            let device = client
+                .get_all_controllers()
+                .await?
+                .into_iter()
+                .find(|c| c.location() == &device_path);
 
-    let path = get_keymap_filepath(&keyboard_controller);
+            if let Some(device) = device {
+                let out_file = get_keymap_filepath(&device);
+                if std::fs::exists(&out_file).unwrap_or(false) {
+                    println!(
+                        "This device already has a keymap file! If you wish to redo the setup, please delete the old file at {} and then rerun the setup.",
+                        out_file.to_string_lossy()
+                    );
+                    std::process::exit(1);
+                }
 
-    println!("Using keymap file at {}", path.to_string_lossy());
+                let keymap = setup_device(&device).await?;
+                println!("Finished setting up {} at {}.", device.name(), "");
 
-    let ledmap = match std::fs::read_to_string(&path) {
-        Err(_) => {
-            println!("No matching keymap file found. Starting setup.");
-            let map = setup_device(&keyboard_controller).await?;
-            std::fs::write(path, map.as_file_string()).unwrap();
-            map
+                std::fs::write(out_file, keymap.as_file_string()).unwrap();
+                std::process::exit(0);
+            } else {
+                println!("OpenRGB can't find a compatible device at {device_path}. Aborting.");
+                std::process::exit(2);
+            }
         }
-        Ok(file) => KeyMapping::parse_from_file(file).unwrap(),
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel::<KeyEvent>();
-    let mut device = HidReader::<512>::new_from_path(keyboard_controller.location()).unwrap();
-    tokio::spawn(async move {
-        loop {
-            tx.send(device.read_blocking().unwrap()).unwrap()
-        }
-    });
+        Command::Run => {}
+    }
 
     let sleep_time = 1000 / config.fps() as u64;
     println!("Frame time: {sleep_time}ms");
 
-    let mut func: Box<dyn LedFunction> =
-        Box::new(<FadeLeds as LedFunction>::new(&keyboard_controller));
+    let try_setup_thread = |controller: Controller| -> Option<(String, Receiver<()>)> {
+        let keymap_file = std::fs::read_to_string(get_keymap_filepath(&controller)).ok()?;
+        let keymap = KeyMapping::parse_from_file(keymap_file)?;
+
+        let mut hid = HidReader::<256>::new_from_path(controller.location())?;
+
+        let (tx, hid_event_reader) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            while let Ok(event) = hid.read_blocking() {
+                if tx.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let (tx, thread_exited) = mpsc::channel();
+
+        let location = controller.location().to_string();
+        let config = config.clone();
+
+        println!(
+            "Spawning thread for {} (at {})",
+            controller.name(),
+            controller.location()
+        );
+
+        std::thread::spawn(move || {
+            if smol::block_on(async {
+                controller.init().await?;
+                controller.turn_off_leds().await?;
+                Ok::<(), OpenRgbError>(())
+            })
+            .is_err()
+            {
+                tx.send(()).unwrap();
+                return;
+            };
+
+            let mut func = FadeLeds::new(&controller);
+            'outer: loop {
+                std::thread::sleep(Duration::from_millis(sleep_time));
+                let mut events = Vec::new();
+
+                loop {
+                    match hid_event_reader.try_recv() {
+                        Err(TryRecvError::Empty) => break,
+                        Ok(event) => {
+                            events.push(event);
+                        }
+                        Err(TryRecvError::Disconnected) => break 'outer,
+                    }
+                }
+
+                if func.update(&config, &events, &keymap, &controller).is_err() {
+                    break;
+                }
+            }
+
+            tx.send(()).unwrap();
+        });
+
+        Some((location, thread_exited))
+    };
+
+    let mut active_devices: HashMap<String, Receiver<()>> = HashMap::new();
 
     loop {
-        tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+        let to_remove = active_devices
+            .iter()
+            .filter_map(|(path, recv)| match recv.try_recv() {
+                Ok(_) | Err(TryRecvError::Disconnected) => {
+                    println!("Thread for {path} closed. Removing from active.");
 
-        let events = rx.try_iter().collect::<Vec<_>>();
+                    Some(path.clone())
+                }
+                Err(TryRecvError::Empty) => None,
+            })
+            .collect::<Vec<_>>();
 
-        func.update(&config, &events, &ledmap, &keyboard_controller)?;
+        for path in to_remove.into_iter() {
+            active_devices.remove(&path);
+        }
+
+        let controllers = client
+            .get_controllers_of_type(DeviceType::Keyboard)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| !active_devices.contains_key(c.location()))
+            .collect::<Vec<_>>();
+
+        // FIXME(upstream): openrgb2 currently doesn't handle `DeviceListUpdated` packets correctly (in fact, it just panics!)
+        // this means that we can't get updated device locations if a device is un- and then replugged while the server is running.
+        for mut controller in controllers {
+            controller.sync_controller_data().await.unwrap();
+            if let Some((key, value)) = try_setup_thread(controller) {
+                active_devices.insert(key, value);
+            }
+        }
+
+        Timer::after(Duration::from_millis(100)).await;
     }
 }
