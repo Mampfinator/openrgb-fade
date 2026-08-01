@@ -3,7 +3,7 @@ let
     cargo-toml = lib.importTOML ./Cargo.toml;
 in
 pkgs.rustPlatform.buildRustPackage {
-    name = cargo-toml.package.name;
+    pname = cargo-toml.package.name;
     version = cargo-toml.package.version;
 
     src = ./.;

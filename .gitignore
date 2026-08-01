@@ -1,4 +1,4 @@
 /target
 *.keymap
 .direnv/
-result/
+/result
