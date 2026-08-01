@@ -1,4 +1,4 @@
-{ lib, pkgs }:
+{ lib, pkgs, ... }:
 let 
     cargo-toml = lib.importTOML ./Cargo.toml;
 in
