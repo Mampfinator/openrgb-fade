@@ -1,7 +1,8 @@
 {
   config,
   lib,
-  pkgs
+  pkgs,
+  ...
 }:
 let 
   openrgb-fade = pkgs.callPackage ./package.nix { };
