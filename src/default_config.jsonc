@@ -5,8 +5,15 @@
         "r": 255,
         "g": 100,
         "b": 255
-    }
+    },
     // How many times per second key brightness should be recalculated.
     // Higher values lead to smoother colors, but also higher CPU usage.
-    // "fps": 60
+    "fps": 30,
+    // How high the maximum brightness of a pressed LED should be.
+    // 255 is highest, 1 is lowest.
+    "max_brightness": 255,
+    // Ticks to wait before starting to fade out the key.
+    "fadeout_delay": 5,
+    // Minimum brightness of an LED before it should be turned off.
+    "brightness_cutoff": 200
 }

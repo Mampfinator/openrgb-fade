@@ -31,8 +31,10 @@ impl From<Color> for OrgbColor {
 pub struct Config {
     color: Color,
     fps: Option<usize>,
-    fadeout_time_ms: Option<usize>,
     server: Option<SDKServerInfo>,
+    max_brightness: Option<u8>,
+    fadeout_delay: Option<usize>,
+    brightness_cutoff: Option<u8>,
 }
 
 pub const DEFAULT_CONFIG: &str = include_str!("default_config.jsonc");
@@ -46,9 +48,16 @@ impl Config {
         self.fps.unwrap_or(60)
     }
 
-    // TODO: implement
-    pub fn fadeout_time_ms(&self) -> usize {
-        self.fadeout_time_ms.unwrap_or(1000)
+    pub fn max_brightness(&self) -> u8 {
+        self.max_brightness.unwrap_or(255)
+    }
+
+    pub fn fadeout_delay(&self) -> usize {
+        self.fadeout_delay.unwrap_or(0)
+    }
+
+    pub fn brightness_cutoff(&self) -> u8 {
+        self.brightness_cutoff.unwrap_or(0)
     }
 
     pub fn load_from_first() -> Option<Self> {

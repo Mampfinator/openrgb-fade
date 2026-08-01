@@ -1,27 +1,42 @@
 use openrgb2::{Color, Controller, OpenRgbResult};
 
-use crate::LedFunction;
+use crate::{LedFunction, config::Config};
 
 #[derive(Default, Clone, Copy, Debug)]
 pub enum FadeState {
     #[default]
     Off,
-    On(Brightness),
+    On {
+        brightness: Brightness,
+        elapsed_ticks: usize,
+    },
 }
 
 impl FadeState {
-    pub fn update(&mut self) {
-        if let Self::On(brightness) = self
-            && brightness.tick().is_none()
+    pub fn update(&mut self, config: &Config) {
+        if let Self::On {
+            brightness,
+            elapsed_ticks,
+        } = self
         {
-            *self = FadeState::Off;
+            *elapsed_ticks += 1;
+            if *elapsed_ticks >= config.fadeout_delay() && brightness.tick().is_none() {
+                *self = FadeState::Off;
+            }
         }
     }
 
     pub fn get_brightness(&self) -> u8 {
         match self {
-            Self::On(brightness) => brightness.0,
+            Self::On { brightness, .. } => brightness.0,
             Self::Off => 0,
+        }
+    }
+
+    pub fn on(brightness: u8) -> Self {
+        Self::On {
+            brightness: Brightness::new(brightness),
+            elapsed_ticks: 0,
         }
     }
 }
@@ -30,7 +45,9 @@ impl FadeState {
 pub struct Brightness(u8);
 
 impl Brightness {
-    pub const MAX: Brightness = Brightness(255);
+    pub fn new(brightness: u8) -> Self {
+        Self(brightness)
+    }
 
     pub fn tick(&mut self) -> Option<()> {
         if self.0 == 0 {
@@ -64,7 +81,7 @@ impl LedFunction for FadeLeds {
             if event.is_down()
                 && let Some(led) = key_map.get_led(event.key_bytes())
             {
-                self.state[led] = FadeState::On(Brightness::MAX)
+                self.state[led] = FadeState::on(config.max_brightness());
             }
         }
 
@@ -73,14 +90,14 @@ impl LedFunction for FadeLeds {
 
         for led in controller.led_iter() {
             let state = self.state.get_mut(led.id()).unwrap();
-            state.update();
+            state.update(&config);
 
             let brightness = state.get_brightness();
 
-            let new_color = if brightness == 0 {
+            let new_color = if brightness <= config.brightness_cutoff() {
                 Color::new(0, 0, 0)
             } else {
-                color / (255 - brightness)
+                color / (255 - brightness).max(1)
             };
 
             cmd.set_led(led.id(), new_color)?;

@@ -1,15 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    pin::Pin,
     str::FromStr,
     sync::mpsc::{self, Receiver, TryRecvError},
-    task::{Context, Poll},
     time::Duration,
 };
 
 use clap::{Parser, Subcommand};
-use openrgb2::{Color, Controller, DeviceType, OpenRgbClient, OpenRgbError, OpenRgbResult};
+use openrgb2::{Color, Controller, OpenRgbClient, OpenRgbError, OpenRgbResult};
 use smol::Timer;
 
 use crate::{
@@ -239,23 +237,22 @@ async fn main() -> OpenRgbResult<()> {
             active_devices.remove(&path);
         }
 
-        let controllers = client
-            .get_controllers_of_type(DeviceType::Keyboard)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|c| !active_devices.contains_key(c.location()))
-            .collect::<Vec<_>>();
-
-        // FIXME(upstream): openrgb2 currently doesn't handle `DeviceListUpdated` packets correctly (in fact, it just panics!)
-        // this means that we can't get updated device locations if a device is un- and then replugged while the server is running.
-        for mut controller in controllers {
-            controller.sync_controller_data().await.unwrap();
-            if let Some((key, value)) = try_setup_thread(controller) {
-                active_devices.insert(key, value);
+        if let Ok(controllers) = client.get_all_controllers().await.map(|group| {
+            group
+                .into_iter()
+                .filter(|controller| !active_devices.contains_key(controller.location()))
+                .collect::<Vec<_>>()
+        }) {
+            // FIXME(upstream): openrgb2 currently doesn't handle `DeviceListUpdated` packets correctly (in fact, it just panics!)
+            // this means that we can't get updated device locations if a device is un- and then replugged while the server is running.
+            for mut controller in controllers {
+                controller.sync_controller_data().await.unwrap();
+                if let Some((key, value)) = try_setup_thread(controller) {
+                    active_devices.insert(key, value);
+                }
             }
         }
 
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(250)).await;
     }
 }
