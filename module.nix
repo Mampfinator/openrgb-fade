@@ -1,12 +1,10 @@
 {
   config,
   lib,
-  pkgs ? import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/nixos-unstable.tar.gz") { },
-  ...
+  pkgs
 }:
 let 
   openrgb-fade = pkgs.callPackage ./package.nix { };
-  cfg = config.services.openrgb-fade;
 in
 {
   options.services.openrgb-fade.enable = lib.mkEnableOption "openrgb-fade user service";
