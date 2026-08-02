@@ -7,6 +7,7 @@ pub enum FadeState {
     #[default]
     Off,
     On {
+        should_tick: bool,
         brightness: Brightness,
         elapsed_ticks: usize,
     },
@@ -17,8 +18,12 @@ impl FadeState {
         if let Self::On {
             brightness,
             elapsed_ticks,
+            should_tick,
         } = self
         {
+            if !*should_tick {
+                return;
+            }
             *elapsed_ticks += 1;
             if *elapsed_ticks >= config.fadeout_delay() && brightness.tick().is_none() {
                 *self = FadeState::Off;
@@ -33,10 +38,17 @@ impl FadeState {
         }
     }
 
+    pub fn enable_tick(&mut self) {
+        if let Self::On { should_tick, .. } = self {
+            *should_tick = true;
+        }
+    }
+
     pub fn on(brightness: u8) -> Self {
         Self::On {
             brightness: Brightness::new(brightness),
             elapsed_ticks: 0,
+            should_tick: false,
         }
     }
 }
@@ -82,6 +94,8 @@ impl LedFunction for FadeLeds {
                 && let Some(led) = key_map.get_led(event.key_bytes())
             {
                 self.state[led] = FadeState::on(config.max_brightness());
+            } else if let Some(led) = key_map.get_led(event.key_bytes()) {
+                self.state[led].enable_tick();
             }
         }
 
